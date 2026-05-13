@@ -5,69 +5,104 @@ import datetime
 import time
 
 # ======================
-# 頁面
+# UI
 # ======================
-st.set_page_config(page_title="TWSE v3 全市場掃描器", layout="wide")
-st.title("📊 TWSE v3 全市場強勢股掃描器")
+st.set_page_config(page_title="TWSE 穩定掃描器 v5", layout="wide")
+st.title("📊 TWSE 全市場強勢股掃描器 v5（穩定終極版）")
 
 # ======================
-# TWSE 全市場資料
+# Session headers（模擬瀏覽器）
 # ======================
-@st.cache_data(ttl=300)
-def get_twse_all():
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Referer": "https://www.twse.com.tw/",
+}
+
+session = requests.Session()
+
+# ======================
+# TWSE API 1（主）
+# ======================
+def fetch_twse_primary():
 
     url = "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL"
 
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://www.twse.com.tw/",
-    }
+    try:
+        session.get("https://www.twse.com.tw/", headers=HEADERS, timeout=10)
 
-    params = {
-        "date": "",
-        "response": "json"
-    }
+        resp = session.get(
+            url,
+            headers=HEADERS,
+            params={"response": "json"},
+            timeout=20
+        )
 
-    session = requests.Session()
+        if not resp.text or len(resp.text) < 50:
+            return None
 
-    for i in range(3):  # 🔥 retry
+        data = resp.json()
 
-        try:
-            resp = session.get(
-                url,
-                headers=headers,
-                params=params,
-                timeout=20
-            )
+        if "data" not in data:
+            return None
 
-            if not resp.text.strip():
-                continue
+        df = pd.DataFrame(data["data"], columns=data["fields"])
+        return df
 
-            data = resp.json()
-
-            if "data" not in data:
-                continue
-
-            df = pd.DataFrame(data["data"], columns=data["fields"])
-
-            return df
-
-        except Exception as e:
-            st.warning(f"TWSE retry {i+1}/3 failed")
-
-            time.sleep(1)
-
-    return None
+    except:
+        return None
 
 
 # ======================
-# 資料清洗
+# TWSE API 2（備援）
 # ======================
-def clean_df(df):
+def fetch_twse_backup():
+
+    url = "https://www.twse.com.tw/exchangeReport/MI_INDEX"
+
+    try:
+        resp = session.get(
+            url,
+            headers=HEADERS,
+            params={"response": "json"},
+            timeout=20
+        )
+
+        data = resp.json()
+
+        if "data9" not in data:
+            return None
+
+        df = pd.DataFrame(data["data9"], columns=data["fields9"])
+
+        return df
+
+    except:
+        return None
+
+
+# ======================
+# 自動抓資料（雙備援）
+# ======================
+@st.cache_data(ttl=300)
+def get_all_data():
+
+    df = fetch_twse_primary()
+
+    if df is None or len(df) == 0:
+        st.warning("⚠️ 主 API 失敗，切換備援 API")
+        df = fetch_twse_backup()
+
+    return df
+
+
+# ======================
+# 清理資料
+# ======================
+def clean(df):
 
     df = df.copy()
 
-    # 欄位轉換
     rename_map = {
         "證券代號": "Code",
         "證券名稱": "Name",
@@ -80,16 +115,13 @@ def clean_df(df):
     df = df.rename(columns=rename_map)
 
     for col in ["Close", "Change", "Volume", "Value"]:
-
         if col in df.columns:
-
             df[col] = (
                 df[col]
                 .astype(str)
                 .str.replace(",", "")
                 .replace("--", "0")
             )
-
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df = df.dropna(subset=["Close", "Volume"])
@@ -98,9 +130,9 @@ def clean_df(df):
 
 
 # ======================
-# 技術分析核心
+# 技術分析模型
 # ======================
-def score_stock(row):
+def score(row):
 
     try:
         close = float(row["Close"])
@@ -109,44 +141,34 @@ def score_stock(row):
         value = float(row["Value"])
 
         prev = close - change
-
         change_pct = (change / prev * 100) if prev > 0 else 0
 
         score = 0
-        reasons = []
+        reason = []
 
-        # ======================
-        # 漲幅動能
-        # ======================
+        # ===== 價格動能 =====
         if change_pct > 3:
             score += 3
-            reasons.append("強勢突破")
-
+            reason.append("強勢突破")
         elif change_pct > 1.5:
             score += 2
-            reasons.append("中強上漲")
-
+            reason.append("中強上漲")
         elif change_pct > 0.5:
             score += 1
-            reasons.append("小漲動能")
+            reason.append("小幅上漲")
 
-        # ======================
-        # 成交量（市場相對）
-        # ======================
+        # ===== 成交量 =====
         if volume > 10_000_000:
             score += 2
-            reasons.append("爆量")
-
+            reason.append("爆量")
         elif volume > 3_000_000:
             score += 1
-            reasons.append("放量")
+            reason.append("放量")
 
-        # ======================
-        # 成交金額
-        # ======================
+        # ===== 成交金額 =====
         if value > 500_000_000:
             score += 1
-            reasons.append("資金進場")
+            reason.append("資金進場")
 
         if score >= 3:
 
@@ -158,7 +180,7 @@ def score_stock(row):
                 "volume_m": round(volume / 1_000_000, 2),
                 "value_b": round(value / 100_000_000, 2),
                 "score": score,
-                "reason": "、".join(reasons)
+                "reason": "、".join(reason)
             }
 
     except:
@@ -170,15 +192,15 @@ def score_stock(row):
 # ======================
 if st.button("🚀 開始掃描 TWSE 全市場", type="primary"):
 
-    with st.spinner("📡 正在抓取 TWSE 全市場資料..."):
+    with st.spinner("📡 正在取得 TWSE 資料..."):
 
-        df = get_twse_all()
+        df = get_all_data()
 
-    if df is None:
-        st.error("❌ TWSE API 無回應")
+    if df is None or len(df) == 0:
+        st.error("❌ TWSE API 完全失敗（主+備援）")
         st.stop()
 
-    df = clean_df(df)
+    df = clean(df)
 
     st.success(f"✅ 成功取得 {len(df)} 檔股票")
 
@@ -193,7 +215,7 @@ if st.button("🚀 開始掃描 TWSE 全市場", type="primary"):
             progress.progress(i / len(df))
             status.text(f"分析中 {i}/{len(df)}")
 
-        r = score_stock(row)
+        r = score(row)
 
         if r:
             results.append(r)
@@ -202,7 +224,7 @@ if st.button("🚀 開始掃描 TWSE 全市場", type="primary"):
     status.empty()
 
     if not results:
-        st.warning("沒有強勢股")
+        st.warning("沒有找到強勢股")
         st.stop()
 
     result_df = pd.DataFrame(results)
@@ -218,7 +240,7 @@ if st.button("🚀 開始掃描 TWSE 全市場", type="primary"):
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.metric("強勢股數量", len(result_df))
+        st.metric("強勢股數", len(result_df))
 
     with col2:
         st.metric("平均漲幅", f"{result_df['change_pct'].mean():.2f}%")
@@ -227,49 +249,49 @@ if st.button("🚀 開始掃描 TWSE 全市場", type="primary"):
         st.metric("最高分數", result_df["score"].max())
 
     # ======================
-    # CSV
+    # download
     # ======================
     csv = result_df.to_csv(index=False, encoding="utf-8-sig")
 
     st.download_button(
-        "📥 下載結果",
+        "📥 下載 CSV",
         csv,
-        file_name=f"twse_v3_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        file_name=f"twse_v5_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv"
     )
 
 
 # ======================
-# 側邊欄
+# sidebar
 # ======================
 with st.sidebar:
 
-    st.header("📊 v3 模型")
+    st.header("📊 v5 架構")
 
     st.markdown("""
-### 🔥 三大因子模型
+### 🔥 雙 API 架構
 
-#### 📈 價格動能
-- >3% 強突破
-- >1.5% 中強
-- >0.5% 動能
-
-#### 📊 量能
-- >1000萬股 爆量
-- >300萬股 放量
-
-#### 💰 資金
-- >5億成交金額
+1️⃣ STOCK_DAY_ALL（主）  
+2️⃣ MI_INDEX（備援）
 
 ---
 
-### 🧠 v3 升級點
+### 🧠 穩定策略
+
+- session cookie 模擬瀏覽器  
+- retry fallback  
+- JSON fail 自動切換  
+- 空 response 防護  
+
+---
+
+### 🚀 v5 特點
+
+✔ 不怕 307  
+✔ 不怕 JSON error  
+✔ 不怕空資料  
+✔ TWSE 原生資料  
 ✔ 全市場掃描  
-✔ TWSE 官方 API  
-✔ retry 機制  
-✔ 清洗 NaN / "--"  
-✔ 動能模型  
-✔ 可擴展成量化策略  
 """)
 
-st.caption("⚠️ 僅供研究，不構成投資建議")
+st.caption("⚠️ TWSE 官方資料｜僅供研究用途")
