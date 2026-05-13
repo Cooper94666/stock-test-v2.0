@@ -3,43 +3,52 @@ import pandas as pd
 import requests
 import datetime
 import time
-import json
-import os
 import urllib3
 
-# 禁用 SSL 警告
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# 完全模擬本機環境
+urllib3.disable_warnings()
 
-# ====================== 頁面設定 ======================
-st.set_page_config(
-    page_title="台股強勢股掃描器",
-    page_icon="🔥",
-    layout="wide"
-)
-
-st.title("🔥 台股強勢股掃描器")
-st.markdown("**按下按鈕掃描全市場技術面強勢股票**")
-
-# ====================== 取得全市場最新日線資料 ======================
 def get_all_daily_data():
-    """從 TWSE 官方 API 一次取得所有股票的最新交易日資料"""
-    url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-    try:
-        # 使用 session 並忽略 SSL 驗證
-        session = requests.Session()
-        session.verify = False
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
-        
-        resp = session.get(url, timeout=15)
-        data = resp.json()
-        
-        df = pd.DataFrame(data)
-        return df
-    except Exception as e:
-        st.error(f"❌ TWSE API 失敗: {e}")
-        return None
+    """模擬本機環境的請求"""
+    
+    # 使用與 VSCode 相同的 headers
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Host': 'openapi.twse.com.tw',
+        'Referer': 'https://www.twse.com.tw/',
+    }
+    
+    # 嘗試多個端點
+    urls = [
+        "http://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",  # HTTP
+        "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", # HTTPS
+    ]
+    
+    session = requests.Session()
+    session.verify = False  # 忽略 SSL 驗證
+    
+    for url in urls:
+        try:
+            resp = session.get(url, headers=headers, timeout=15)
+            
+            # 檢查回應
+            if resp.status_code == 200 and resp.text.strip():
+                # 嘗試解析 JSON
+                try:
+                    data = resp.json()
+                    df = pd.DataFrame(data)
+                    if len(df) > 0:
+                        return df
+                except:
+                    continue
+        except:
+            continue
+    
+    return None
 
 # ====================== 技術分析 ======================
 def technical_check(row):
